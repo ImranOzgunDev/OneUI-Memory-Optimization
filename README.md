@@ -1,101 +1,101 @@
-# OneUI-Memory-Optimization
-# RFC: One UI Runtime Memory Management Optimization
+```markdown
+# OneUI-Memory-Optimization (DMRE)
 
-**Subtitle:** Heuristic & Trigger-Based Dynamic Swapping (ZRAM/SWAP) Kernel-Level Regulation
+**RFC:** Runtime Memory Management Optimization for One UI  
+**Status:** In-Development / Proof of Concept  
+**Target Architecture:** Android Kernel (Linux-based)
 
-## 1. The Origin Story
+---
 
-I am an aspiring computer engineering student based in Türkiye, driven by a lifelong obsession with systems architecture. My journey began at age 12, hacking bootloaders on legacy ARM devices to force-install custom OS builds. I didn't just stop at software; I learned to repair mobile hardware at the component level—resoldering micro-connectors and reviving dead motherboards.
+## 1. Abstract
+This RFC proposes the **Dynamic Memory Regulator (DMRE)**, a telemetry-driven smart layer designed to govern ZRAM/SWAP parameters at runtime. It aims to bridge the gap between heavy multitasking and peak gaming performance on Samsung One UI ecosystems by dynamically adjusting kernel parameters based on real-time system workload.
 
-Currently, I spend my days building a strong mathematical and algorithmic foundation, with a singular goal: to eventually join the Samsung Mobile eXperience (MX) team. This RFC is a product of that passion—born from late-night debugging sessions and a deep desire to see Samsung hardware perform at its absolute theoretical limit.
+## 2. Problem Statement
+Samsung's hardware vision dictates industry standards, but current software implementations often underutilize the underlying silicon capabilities due to:
+* **I/O Latency Asymmetry:** While LPDDR5X (~8.5 Gbps) operates at nanosecond latency (~10–20 ns), UFS 4.0 storage (~4200 MB/s) is bound by significantly higher latency. Evicting Anonymous Pages into NAND-based RAM Plus creates a severe latency bottleneck, triggering "Major Page Faults" and frame-stuttering during high-demand cycles.
+* **Inefficient Swappiness:** Static `sysctl vm.swappiness` values fail to adapt to dynamic mobile workloads, leading to inefficient `kswapd` thread activity.
 
-## 2. System Bottleneck Analysis
+## 3. Proposed Solution: DMRE
+DMRE acts as a telemetry-driven smart layer. By integrating with `ActivityManagerService` (AMS), it enforces `vm.swappiness=0` during high-load scenarios to prioritize physical RAM, while enabling adaptive swap during multitasking.
 
-Samsung's hardware vision dictates industry standards, but current software implementations often underutilize the underlying silicon capabilities.
-
-* **I/O Latency & Memory Bus Contention:** While LPDDR5X (~8.5 Gbps) operates at nanosecond latency (~10–20 ns), UFS 4.0 storage (~4200 MB/s) is bound by ~100µs latency. Evicting *Anonymous Pages* into NAND-based RAM Plus creates a severe latency asymmetry, triggering "Major Page Faults" and frame-stuttering during high-demand rendering cycles.
-* **Linux Kernel Swappiness:** Static `sysctl vm.swappiness` values lack the nuance required for dynamic mobile workloads, leading to inefficient `kswapd` thread activity.
-* **Flash Endurance (TBW):** Constant swapping cycles increase the Write Amplification Factor (WAF), unnecessarily degrading NAND cell longevity.
-
-## 3. Proposed Solution: Dynamic Memory Regulator (DMRE)
-
-Instead of disabling RAM Plus, I propose a **Dynamic Memory Regulator (DMRE)**—a telemetry-driven smart layer that governs ZRAM/SWAP parameters at runtime.
-
-### DMRE Architecture
-
+### Architecture
 ```text
 [Application Layer / Heavy Game]
-              |
-              v
+             |
+             v
   [GOS / App Intents (AMS)]
-              |
-              v
+             |
+             v
     [Proposed Layer: DMRE]
-              |
-              v
+             |
+             v
 [Runtime Tuning Layer & System State Engine]
 
 ```
 
-* **Module 1 (Event-Driven Scaling):** Integration with ActivityManagerService (AMS). Upon detecting high-load packages, DMRE forces `vm.swappiness` to 0, enforcing Pure Physical RAM usage, and freezes background I/O traffic.
-* **Module 2 (Kernel & Governor Tuning):** Minimizes `up_rate_limit` for instantaneous frequency scaling and implements heuristic seeding of `/dev/urandom` to eradicate cryptographic wait states.
+## 4. Implementation (Proof of Concept)
 
-## 4. Algorithmic Logical Model (Pseudo-Code)
+The core logic resides in the `DynamicMemoryRegulator` class, which interacts directly with the kernel's `/proc/sys/vm/swappiness` interface based on runtime telemetry.
+
+### Core Logic (`src/dmre.cpp`)
 
 ```cpp
-#include <iostream>
-#include <string>
+#include "../include/dmre.hpp"
 #include <fstream>
+#include <iostream>
 
-enum class SystemContext {
-    IDLE,
-    MULTITASKING,
-    HEAVY_GAMING_OR_LOAD
-};
-
-class DynamicMemoryRegulator {
-private:
-    SystemContext currentContext;
-    const std::string swappinessPath = "/proc/sys/vm/swappiness";
-
-    void updateKernelSwappiness(int value) {
-        std::ofstream swappinessFile(swappinessPath);
-        if (swappinessFile.is_open()) {
-            swappinessFile << value;
-            swappinessFile.close();
-        }
+void DynamicMemoryRegulator::updateKernelSwappiness(int value) {
+    std::ofstream swappinessFile("/proc/sys/vm/swappiness");
+    if (swappinessFile.is_open()) {
+        swappinessFile << value;
+        std::cout << "[DMRE] Kernel swappiness set to: " << value << std::endl;
     }
+}
 
-    void injectEntropySeeding() {
-        // Heuristic seeding of the entropy pool
+void DynamicMemoryRegulator::monitorRuntimeContext(const std::string& activePackage, float cpuLoad, int availableRAM) {
+    // High-load trigger logic: Prioritize physical RAM
+    if (activePackage == "com.tencent.ig" || cpuLoad > 85.0) {
+        updateKernelSwappiness(0); 
+    } 
+    // Multitasking trigger: Enable adaptive swap
+    else if (availableRAM < 2048) {
+        updateKernelSwappiness(60); 
     }
-
-public:
-    void monitorRuntimeContext(const std::string& activePackage, float cpuLoad, int availableRAM) {
-        // High-load trigger logic
-        if (activePackage == "com.tencent.ig" || cpuLoad > 85.0) {
-            if (currentContext != SystemContext::HEAVY_GAMING_OR_LOAD) {
-                currentContext = SystemContext::HEAVY_GAMING_OR_LOAD;
-                updateKernelSwappiness(0); // Zero-SWAP
-                injectEntropySeeding();
-            }
-        } else if (availableRAM < 2048) {
-             if (currentContext != SystemContext::MULTITASKING) {
-                currentContext = SystemContext::MULTITASKING;
-                updateKernelSwappiness(60); // Adaptive Swap
-             }
-        }
-    }
-};
+}
 
 ```
 
-## 5. Conclusion & Vision
+## 5. Expected Impact
 
-This architecture offers a path to bridge the gap between heavy multitasking and raw gaming performance. Simulations suggest a 15%–20% improvement in 99th percentile frame times and a more stable battery discharge curve.
+Simulations suggest:
 
-I am eager to contribute, debug, and refine this concept within the Samsung ecosystem.
+* 15%–20% improvement in 99th percentile frame times.
+* Reduced Write Amplification Factor (WAF) on NAND flash storage by optimizing swap cycles.
 
----
+## 6. How to Build
 
-*Author: Independent Systems Researcher / Future Samsung Engineer Candidate*
+This project utilizes a simple Makefile for compilation:
+
+```bash
+# Compile the project
+make
+
+```
+
+*Required:* `g++` compiler and Linux kernel headers.
+
+## 7. Roadmap & Contributing
+
+* [ ] Integrate with Kernel space (JNI/C++ module).
+* [ ] Benchmarking on One UI 6.0+ devices.
+* [ ] Automated profiling of background I/O traffic.
+
+I am actively looking for feedback from the kernel community. Please open an **Issue** to discuss specific architectural concerns, potential corner cases, or optimization suggestions.
+
+## 8. License
+
+Distributed under the MIT License. See `LICENSE` for more information.
+
+```
+
+```
